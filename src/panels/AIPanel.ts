@@ -69,6 +69,12 @@ export class AIPanel {
           case "attachCode":
             await this._handleAttachCode();
             break;
+          case "removeFile":
+            this._handleRemoveFile(message.fileName);
+            break;
+          case "clearContext":
+            this._handleClearContext();
+            break;
         }
       },
       null,
@@ -76,26 +82,42 @@ export class AIPanel {
     );
   }
 
+  private _handleRemoveFile(fileName: string): void {
+    // Remove the file from conversation context
+    this._conversation = this._conversation.filter((msg) => {
+      // Only filter out system messages that contain this file
+      if (
+        msg.role === "system" &&
+        msg.content.includes(`Code attachment - ${fileName}:`)
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    AIPanel._outputChannel.appendLine(`Removed file from context: ${fileName}`);
+  }
+
   private async _handleAttachCode(): Promise<void> {
     try {
       const codeContent = await this._getActiveEditorContent();
       if (codeContent) {
-        const lastUserMessage = this._findLastUserMessage();
-        if (lastUserMessage) {
-          // Update the last user message with the attached code
-          lastUserMessage.content += `\n\nCode attachment:\n\`\`\`\n${codeContent.text}\n\`\`\``;
+        // Regardless of whether there's a user message, add the code to context
+        // Rather than attaching to a specific message
+        const attachmentMsg = `File added to context: ${codeContent.fileName}`;
 
-          // Inform the webview about the code attachment
-          this._sendMessageToWebview({
-            type: "codeAttached",
-            content: "Code attached to your last message",
-          });
-        } else {
-          this._sendMessageToWebview({
-            type: "error",
-            content: "No user message found to attach code to",
-          });
-        }
+        // Add the code to a system message in the conversation
+        this._conversation.push({
+          role: "system",
+          content: `Code attachment - ${codeContent.fileName}:\n\`\`\`\n${codeContent.text}\n\`\`\``,
+        });
+
+        // Inform the webview about the code attachment
+        this._sendMessageToWebview({
+          type: "codeAttached",
+          fileName: codeContent.fileName,
+          content: attachmentMsg,
+        });
       } else {
         this._sendMessageToWebview({
           type: "error",
@@ -147,6 +169,19 @@ export class AIPanel {
         content: errorMessage,
       });
     }
+  }
+
+  private _handleClearContext(): void {
+    // Keep only non-system messages
+    this._conversation = this._conversation.filter(
+      (msg) => msg.role !== "system"
+    );
+
+    this._sendMessageToWebview({
+      type: "contextCleared",
+    });
+
+    AIPanel._outputChannel.appendLine("Cleared all files from context");
   }
 
   private async _callOpenAI(): Promise<string> {
@@ -227,6 +262,7 @@ export class AIPanel {
   private async _getActiveEditorContent(): Promise<{
     text: string;
     fileName: string;
+    fileType: string;
   } | null> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
@@ -236,17 +272,19 @@ export class AIPanel {
     const document = editor.document;
     const fileName = path.basename(document.fileName);
     const text = document.getText();
+    const fileType = this._getFileType(document.fileName);
 
     if (!text.trim()) {
       return null;
     }
 
-    return { text, fileName };
+    return { text, fileName, fileType };
   }
 
   private async _promptUserForFile(): Promise<{
     text: string;
     fileName: string;
+    fileType: string;
   } | null> {
     try {
       // Get all text files in the workspace
@@ -285,18 +323,60 @@ export class AIPanel {
         return null;
       }
 
-      // Read the selected file
-      const fileContent = await fs.promises.readFile(
-        selectedFile.fullPath,
-        "utf8"
-      );
-      const fileName = path.basename(selectedFile.fullPath);
+      try {
+        // Read the selected file
+        const fileContent = await fs.promises.readFile(
+          selectedFile.fullPath,
+          "utf8"
+        );
+        const fileName = path.basename(selectedFile.fullPath);
+        const fileType = this._getFileType(selectedFile.fullPath);
 
-      return { text: fileContent, fileName };
+        return { text: fileContent, fileName, fileType };
+      } catch (error) {
+        AIPanel._outputChannel.appendLine(`Error reading file: ${error}`);
+        throw new Error(`Failed to read file: ${error}`);
+      }
     } catch (error) {
       AIPanel._outputChannel.appendLine(`Error selecting file: ${error}`);
-      return null;
+      throw new Error(`Failed to select file: ${error}`);
     }
+  }
+
+  private _getFileType(filePath: string): string {
+    const extension = path.extname(filePath).toLowerCase();
+
+    const fileTypeMap: { [key: string]: string } = {
+      ".js": "javascript",
+      ".ts": "typescript",
+      ".jsx": "javascript",
+      ".tsx": "typescript",
+      ".py": "python",
+      ".html": "html",
+      ".css": "css",
+      ".json": "json",
+      ".md": "markdown",
+      ".c": "c",
+      ".cpp": "cpp",
+      ".h": "c",
+      ".java": "java",
+      ".go": "go",
+      ".rb": "ruby",
+      ".php": "php",
+      ".sh": "bash",
+      ".rs": "rust",
+      ".swift": "swift",
+      ".sql": "sql",
+      ".yml": "yaml",
+      ".yaml": "yaml",
+      ".xml": "xml",
+      ".cs": "csharp",
+      ".kt": "kotlin",
+      ".dart": "dart",
+      ".r": "r",
+    };
+
+    return fileTypeMap[extension] || "plaintext";
   }
 
   private _getWebviewContent(): string {

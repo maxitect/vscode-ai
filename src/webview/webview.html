@@ -6,9 +6,9 @@
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; 
-        style-src 'unsafe-inline'; 
-        script-src 'unsafe-inline' vscode-resource:;
-        connect-src vscode-webview:;"
+    style-src 'unsafe-inline'; 
+    script-src 'unsafe-inline' vscode-resource:;
+    connect-src vscode-webview:;"
     />
     <title>VS Code Assistant</title>
     <style>
@@ -112,10 +112,6 @@
         color: var(--vscode-badge-foreground);
       }
 
-      #attach-btn:hover {
-        background: var(--vscode-checkbox-background);
-      }
-
       .loading {
         display: flex;
         align-items: center;
@@ -181,6 +177,19 @@
   <body>
     <main>
       <section id="chat-container" aria-live="polite"></section>
+      <div id="context-files" aria-label="Attached files">
+        <div class="context-files-header">
+          <span>Files in context:</span>
+          <button
+            type="button"
+            id="clear-context-btn"
+            class="small-btn"
+            aria-label="Clear all files"
+          >
+            Clear All
+          </button>
+        </div>
+      </div>
       <div id="notification" class="notification" role="alert"></div>
       <form id="input-container" aria-label="Chat input">
         <label for="question-input" class="sr-only">Enter your question</label>
@@ -202,12 +211,15 @@
       (function () {
         const vscode = acquireVsCodeApi();
         const chatContainer = document.getElementById("chat-container");
+        const contextFiles = document.getElementById("context-files");
+        const clearContextBtn = document.getElementById("clear-context-btn");
         const questionForm = document.getElementById("input-container");
         const questionInput = document.getElementById("question-input");
         const sendBtn = document.getElementById("send-btn");
         const attachBtn = document.getElementById("attach-btn");
         const notification = document.getElementById("notification");
         let isLoading = false;
+        let attachedFiles = [];
 
         // Add initial greeting message
         addMessage("ai", "Assistant is ready. How can I help you?");
@@ -229,6 +241,94 @@
 
         function scrollToBottom() {
           chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function addFileToContext(fileName, fileType) {
+          // Check if file is already in context
+          if (attachedFiles.some((file) => file.name === fileName)) {
+            return;
+          }
+
+          attachedFiles.push({
+            name: fileName,
+            type: fileType || "text",
+          });
+          updateContextFilesDisplay();
+        }
+
+        function removeFileFromContext(fileName) {
+          const index = attachedFiles.findIndex(
+            (file) => file.name === fileName
+          );
+          if (index > -1) {
+            attachedFiles.splice(index, 1);
+            updateContextFilesDisplay();
+
+            // Inform extension that file was removed
+            vscode.postMessage({
+              command: "removeFile",
+              fileName: fileName,
+            });
+          }
+        }
+
+        function clearAllContext() {
+          attachedFiles = [];
+          updateContextFilesDisplay();
+
+          // Inform extension that all context was cleared
+          vscode.postMessage({
+            command: "clearContext",
+          });
+
+          showNotification("All files removed from context");
+        }
+
+        function updateContextFilesDisplay() {
+          // Clear current display except for header
+          while (contextFiles.children.length > 1) {
+            contextFiles.removeChild(contextFiles.lastChild);
+          }
+
+          // Hide if no files
+          if (attachedFiles.length === 0) {
+            contextFiles.style.display = "none";
+            return;
+          }
+
+          // Show and populate if files exist
+          contextFiles.style.display = "block";
+
+          // Add file tags
+          attachedFiles.forEach((file) => {
+            const fileTag = document.createElement("div");
+            fileTag.className = "context-file-tag";
+
+            // Add file type badge if available
+            if (file.type && file.type !== "plaintext") {
+              const typeBadge = document.createElement("span");
+              typeBadge.className = "file-type-badge";
+              typeBadge.textContent = file.type;
+              fileTag.appendChild(typeBadge);
+            }
+
+            const fileNameSpan = document.createElement("span");
+            fileNameSpan.textContent = file.name;
+
+            const removeBtn = document.createElement("button");
+            removeBtn.innerHTML = "&times;";
+            removeBtn.setAttribute(
+              "aria-label",
+              `Remove ${file.name} from context`
+            );
+            removeBtn.addEventListener("click", () =>
+              removeFileFromContext(file.name)
+            );
+
+            fileTag.appendChild(fileNameSpan);
+            fileTag.appendChild(removeBtn);
+            contextFiles.appendChild(fileTag);
+          });
         }
 
         function showLoading() {
@@ -301,6 +401,7 @@
           }
         }
 
+        // Event listeners
         questionForm.addEventListener("submit", (e) => {
           e.preventDefault();
           sendMessage();
@@ -317,6 +418,10 @@
           attachCode();
         });
 
+        clearContextBtn.addEventListener("click", (e) => {
+          clearAllContext();
+        });
+
         window.addEventListener("message", (event) => {
           const message = event.data;
 
@@ -327,9 +432,26 @@
             hideLoading();
             addMessage("ai", `Error: ${message.content}`);
           } else if (message.type === "codeAttached") {
+            if (message.fileName) {
+              addFileToContext(message.fileName, message.fileType);
+            }
             showNotification(message.content);
+          } else if (message.type === "clear") {
+            // Clear the conversation and files
+            chatContainer.innerHTML = "";
+            attachedFiles = [];
+            updateContextFilesDisplay();
+            addMessage("ai", "Conversation cleared. How can I help you?");
+          } else if (message.type === "contextCleared") {
+            // Clear just the files
+            attachedFiles = [];
+            updateContextFilesDisplay();
+            showNotification("All files removed from context");
           }
         });
+
+        // Initialize UI
+        updateContextFilesDisplay();
       })();
     </script>
   </body>
