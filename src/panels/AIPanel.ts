@@ -66,11 +66,62 @@ export class AIPanel {
               type: "clear",
             });
             break;
+          case "attachCode":
+            await this._handleAttachCode();
+            break;
         }
       },
       null,
       this._disposables
     );
+  }
+
+  private async _handleAttachCode(): Promise<void> {
+    try {
+      const codeContent = await this._getActiveEditorContent();
+      if (codeContent) {
+        const lastUserMessage = this._findLastUserMessage();
+        if (lastUserMessage) {
+          // Update the last user message with the attached code
+          lastUserMessage.content += `\n\nCode attachment:\n\`\`\`\n${codeContent.text}\n\`\`\``;
+
+          // Inform the webview about the code attachment
+          this._sendMessageToWebview({
+            type: "codeAttached",
+            content: "Code attached to your last message",
+          });
+        } else {
+          this._sendMessageToWebview({
+            type: "error",
+            content: "No user message found to attach code to",
+          });
+        }
+      } else {
+        this._sendMessageToWebview({
+          type: "error",
+          content: "No code to attach",
+        });
+      }
+    } catch (error) {
+      const errorMessage = `Error attaching code: ${error}`;
+      AIPanel._outputChannel.appendLine(errorMessage);
+
+      this._sendMessageToWebview({
+        type: "error",
+        content: errorMessage,
+      });
+    }
+  }
+
+  private _findLastUserMessage():
+    | { role: string; content: string }
+    | undefined {
+    for (let i = this._conversation.length - 1; i >= 0; i--) {
+      if (this._conversation[i].role === "user") {
+        return this._conversation[i];
+      }
+    }
+    return undefined;
   }
 
   private async _handleUserMessage(text: string): Promise<void> {
@@ -164,12 +215,88 @@ export class AIPanel {
       vscode.ViewColumn.Beside,
       {
         enableScripts: true,
+        retainContextWhenHidden: true,
       }
     );
 
     AIPanel.currentPanel = new AIPanel(panel, extensionUri);
     AIPanel._outputChannel.appendLine("AI panel created and initialized");
     return AIPanel.currentPanel;
+  }
+
+  private async _getActiveEditorContent(): Promise<{
+    text: string;
+    fileName: string;
+  } | null> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return await this._promptUserForFile();
+    }
+
+    const document = editor.document;
+    const fileName = path.basename(document.fileName);
+    const text = document.getText();
+
+    if (!text.trim()) {
+      return null;
+    }
+
+    return { text, fileName };
+  }
+
+  private async _promptUserForFile(): Promise<{
+    text: string;
+    fileName: string;
+  } | null> {
+    try {
+      // Get all text files in the workspace
+      const files = await vscode.workspace.findFiles(
+        "**/*.{js,ts,jsx,tsx,py,html,css,json,md}",
+        "**/node_modules/**"
+      );
+
+      if (files.length === 0) {
+        return null;
+      }
+
+      // Convert to relative paths for easier selection
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      const rootPath = workspaceFolders ? workspaceFolders[0].uri.fsPath : "";
+
+      const fileItems = files.map((file) => {
+        const relativePath = rootPath
+          ? path.relative(rootPath, file.fsPath)
+          : file.fsPath;
+        return {
+          label: relativePath,
+          description: "",
+          detail: file.fsPath,
+          fullPath: file.fsPath,
+        };
+      });
+
+      // Allow user to select a file
+      const selectedFile = await vscode.window.showQuickPick(fileItems, {
+        placeHolder: "Select a file to attach",
+        ignoreFocusOut: true,
+      });
+
+      if (!selectedFile) {
+        return null;
+      }
+
+      // Read the selected file
+      const fileContent = await fs.promises.readFile(
+        selectedFile.fullPath,
+        "utf8"
+      );
+      const fileName = path.basename(selectedFile.fullPath);
+
+      return { text: fileContent, fileName };
+    } catch (error) {
+      AIPanel._outputChannel.appendLine(`Error selecting file: ${error}`);
+      return null;
+    }
   }
 
   private _getWebviewContent(): string {
